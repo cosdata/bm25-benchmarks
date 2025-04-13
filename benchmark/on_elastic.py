@@ -13,6 +13,8 @@ from beir.retrieval.search.lexical import BM25Search
 from utils.benchmark import get_max_memory_usage, Timer
 from utils.beir import merge_cqa_dupstack, clean_results_keys
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 def compute_top_k_from_scores(
     scores, corpus=None, k=10, sorting=False, with_scores=False
 ):
@@ -119,6 +121,23 @@ def main(
         qrels, results, [1, 10, 100, 1000]
     )
 
+    print("Running per-query latency benchmark...")
+    latencies = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        def timed_query(qid, query):
+            start = time.perf_counter()
+            _ = model.search(queries={qid:query}, corpus=corpus, top_k=top_k)
+            end = time.perf_counter()
+            return (end - start) * 1000.0
+        futures = []
+        for qid, query in queries.items():
+            futures.append(executor.submit(timed_query, qid, query))
+        for future in tqdm(as_completed(futures), total=len(queries), desc="Latency test"):
+            latencies.append(future.result())
+
+    p50 = np.percentile(latencies, 50)
+    p95 = np.percentile(latencies, 95)
+
     max_mem_gb = get_max_memory_usage("GB")
 
     print("=" * 50)
@@ -126,6 +145,8 @@ def main(
     print("-" * 50)
     print(ndcg)
     print(recall)
+    print("p50 latency:", p50)
+    print("p95 latency:", p95)
     print("=" * 50)
 
     # Save everything to json
@@ -151,6 +172,10 @@ def main(
             "map": clean_results_keys(_map),
             "recall": clean_results_keys(recall),
             "precision": clean_results_keys(precision),
+        },
+        "latencies": {
+            "p50": p50,
+            "p95": p95,
         },
     }
 
